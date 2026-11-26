@@ -1,0 +1,84 @@
+name: CLI checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Commit SHA or ref selected by the caller'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable]
+        include:
+          - os: ubuntu-latest
+            rust: 1.91.1
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          toolchain: ${{ matrix.rust }}
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --locked
+      - run: cargo run --locked -- proofs --help
+      - run: python3 tests/e2e.py target/debug/cargo-proofs
+      - run: python3 tests/preview.py target/debug/cargo-proofs
+      - name: Check the crates.io archive
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: |
+          cargo publish --dry-run --locked --registry crates-io
+          cargo package --locked
+          cargo build --manifest-path target/package/cargo-proofs-*/Cargo.toml --target-dir target/package-check --locked
+          python3 target/package/cargo-proofs-*/tests/preview.py target/package-check/debug/cargo-proofs
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        with:
+          name: cargo-proofs-package
+          path: target/package/*.crate
+          if-no-files-found: error
+
+  lean-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MATHLIB_NO_CACHE_ON_UPDATE: '1'
+      LEAN_TOOLCHAIN: leanprover/lean4:v4.35.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Lean for theorem audit checks
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
+          sh /tmp/elan-init.sh -y --default-toolchain "$LEAN_TOOLCHAIN"
+          "$HOME/.elan/bin/lean" +"$LEAN_TOOLCHAIN" --version
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Check generated audit with real Lean and Aeneas
+        run: cargo test --locked aeneas::tests::real_ -- --ignored --test-threads=1

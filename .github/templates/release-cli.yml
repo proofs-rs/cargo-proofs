@@ -1,0 +1,91 @@
+name: Release cargo-proofs
+
+on:
+  push:
+    tags: ['cargo-proofs-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-proofs-crates-io
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  validate:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - name: Validate tag syntax
+        run: |
+          [[ "$RELEASE_TAG" =~ ^cargo-proofs-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check release metadata and main ancestry
+        id: release
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          python3 - <<'PY'
+          import os, pathlib, tomllib
+          package = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']
+          assert package['name'] == 'cargo-proofs'
+          assert os.environ['RELEASE_TAG'] == 'cargo-proofs-v' + package['version'], 'Tag/version mismatch'
+          assert package['license'] == 'MIT OR Apache-2.0'
+          assert package['publish'] == ['crates-io']
+          PY
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.validate.outputs.commit }}
+
+  publish:
+    needs: [validate, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Set up required reviewers before enabling publication. A reviewer verifies
+    # the private ingestion gate against needs.validate.outputs.commit.
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Require explicit release enablement
+        env:
+          ENABLED: ${{ vars.CARGO_PROOFS_TRUSTED_PUBLISHING_ENABLED }}
+        run: |
+          test "$ENABLED" = true || {
+            echo 'Configure and approve the crates-io environment before enabling publication.'
+            exit 1
+          }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Obtain short-lived crates.io token
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish using Trusted Publishing
+        run: cargo publish --locked --registry crates-io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Publication summary
+        run: echo "Published $RELEASE_TAG to https://crates.io/crates/cargo-proofs" >> "$GITHUB_STEP_SUMMARY"
