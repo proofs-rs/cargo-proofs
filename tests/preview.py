@@ -112,6 +112,8 @@ with tempfile.TemporaryDirectory() as temp:
         status,html,headers=fetch(url)
         assert status==200 and 'New report' in html and 'Preview report' in html
         assert 'Web claim text' not in html and 'Local preview — not published' in html
+        assert '<a href="https://github.com/proofs-rs/cargo-proofs">CLI source</a>' in html
+        assert '<a href="https://github.com/proofs-rs/proofs-rs">GitHub</a>' not in html
         assert 'no-store' in headers['Cache-Control'] and "frame-ancestors 'none'" in headers['Content-Security-Policy']
         assert fetch(url,'HEAD')[1]==''
         assert fetch(url,'POST')[0]==405
